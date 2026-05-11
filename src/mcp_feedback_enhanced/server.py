@@ -31,8 +31,7 @@ import sys
 from typing import Annotated, Any
 
 from fastmcp import FastMCP
-from fastmcp.utilities.types import Image as MCPImage
-from mcp.types import TextContent
+from mcp.types import ImageContent, TextContent, ToolAnnotations
 from pydantic import Field
 
 # 導入統一的調試功能
@@ -360,17 +359,17 @@ def create_feedback_text(feedback_data: dict) -> str:
     return "\n\n".join(text_parts) if text_parts else "用戶未提供任何回饋內容。"
 
 
-def process_images(images_data: list[dict]) -> list[MCPImage]:
+def process_images(images_data: list[dict]) -> list[ImageContent]:
     """
-    處理圖片資料，轉換為 MCP 圖片對象
+    處理圖片資料，轉換為標準 MCP ImageContent 對象
 
     Args:
         images_data: 圖片資料列表
 
     Returns:
-        List[MCPImage]: MCP 圖片對象列表
+        List[ImageContent]: 標準 MCP ImageContent 對象列表
     """
-    mcp_images = []
+    image_contents = []
 
     for i, img in enumerate(images_data, 1):
         try:
@@ -378,42 +377,42 @@ def process_images(images_data: list[dict]) -> list[MCPImage]:
                 debug_log(f"圖片 {i} 沒有資料，跳過")
                 continue
 
-            # 檢查數據類型並相應處理
             if isinstance(img["data"], bytes):
-                # 如果是原始 bytes 數據，直接使用
-                image_bytes = img["data"]
+                image_base64 = base64.b64encode(img["data"]).decode("utf-8")
                 debug_log(
-                    f"圖片 {i} 使用原始 bytes 數據，大小: {len(image_bytes)} bytes"
+                    f"圖片 {i} 從 bytes 編碼為 base64，原始大小: {len(img['data'])} bytes"
                 )
             elif isinstance(img["data"], str):
-                # 如果是 base64 字符串，進行解碼
-                image_bytes = base64.b64decode(img["data"])
-                debug_log(f"圖片 {i} 從 base64 解碼，大小: {len(image_bytes)} bytes")
+                image_base64 = img["data"]
+                debug_log(f"圖片 {i} 使用現有 base64 字符串，長度: {len(image_base64)}")
             else:
                 debug_log(f"圖片 {i} 數據類型不支援: {type(img['data'])}")
                 continue
 
-            if len(image_bytes) == 0:
+            if len(image_base64) == 0:
                 debug_log(f"圖片 {i} 數據為空，跳過")
                 continue
 
-            # 根據文件名推斷格式
             file_name = img.get("name", "image.png")
             if file_name.lower().endswith((".jpg", ".jpeg")):
-                image_format = "jpeg"
+                mime_type = "image/jpeg"
             elif file_name.lower().endswith(".gif"):
-                image_format = "gif"
+                mime_type = "image/gif"
+            elif file_name.lower().endswith(".webp"):
+                mime_type = "image/webp"
             else:
-                image_format = "png"  # 默認使用 PNG
+                mime_type = "image/png"
 
-            # 創建 MCPImage 對象
-            mcp_image = MCPImage(data=image_bytes, format=image_format)
-            mcp_images.append(mcp_image)
+            image_content = ImageContent(
+                type="image",
+                data=image_base64,
+                mimeType=mime_type,
+            )
+            image_contents.append(image_content)
 
-            debug_log(f"圖片 {i} ({file_name}) 處理成功，格式: {image_format}")
+            debug_log(f"圖片 {i} ({file_name}) 處理成功，MIME類型: {mime_type}")
 
         except Exception as e:
-            # 使用統一錯誤處理（不影響 JSON RPC）
             error_id = ErrorHandler.log_error_with_context(
                 e,
                 context={"operation": "圖片處理", "image_index": i},
@@ -421,12 +420,19 @@ def process_images(images_data: list[dict]) -> list[MCPImage]:
             )
             debug_log(f"圖片 {i} 處理失敗 [錯誤ID: {error_id}]: {e}")
 
-    debug_log(f"共處理 {len(mcp_images)} 張圖片")
-    return mcp_images
+    debug_log(f"共處理 {len(image_contents)} 張圖片")
+    return image_contents
 
 
 # ===== MCP 工具定義 =====
-@mcp.tool()
+@mcp.tool(
+    output_schema=None,
+    annotations=ToolAnnotations(
+        title="Interactive Feedback",
+        readOnlyHint=False,
+        destructiveHint=False,
+    ),
+)
 async def interactive_feedback(
     project_directory: Annotated[str, Field(description="專案目錄路徑")] = ".",
     summary: Annotated[
@@ -449,7 +455,7 @@ async def interactive_feedback(
         timeout: Timeout in seconds for waiting user feedback (default: 600 seconds)
 
     Returns:
-        list: List containing TextContent and MCPImage objects representing user feedback
+        list: List containing TextContent and ImageContent objects representing user feedback
     """
     # 環境偵測
     is_remote = is_remote_environment()
@@ -464,10 +470,25 @@ async def interactive_feedback(
             project_directory = os.getcwd()
         project_directory = os.path.abspath(project_directory)
 
-        # 使用 Web 模式
-        debug_log("回饋模式: web")
+        # 超時時間優先級: 環境變數 MCP_FEEDBACK_TIMEOUT > 工具參數 timeout > 預設值 600
+        effective_timeout = timeout
+        env_timeout = os.getenv("MCP_FEEDBACK_TIMEOUT")
+        if env_timeout:
+            try:
+                env_timeout_value = int(env_timeout)
+                if env_timeout_value > 0:
+                    effective_timeout = env_timeout_value
+                    debug_log(
+                        f"使用環境變數 MCP_FEEDBACK_TIMEOUT 覆蓋超時時間: {effective_timeout} 秒"
+                    )
+            except ValueError:
+                debug_log(
+                    f"MCP_FEEDBACK_TIMEOUT 格式錯誤 ({env_timeout})，使用工具參數值: {timeout} 秒"
+                )
 
-        result = await launch_web_feedback_ui(project_directory, summary, timeout)
+        debug_log(f"回饋模式: web，超時時間: {effective_timeout} 秒")
+
+        result = await launch_web_feedback_ui(project_directory, summary, effective_timeout)
 
         # 處理取消情況
         if not result:
@@ -491,10 +512,9 @@ async def interactive_feedback(
 
         # 添加圖片回饋
         if result.get("images"):
-            mcp_images = process_images(result["images"])
-            # 修復 arg-type 錯誤 - 直接擴展列表
-            feedback_items.extend(mcp_images)
-            debug_log(f"已添加 {len(mcp_images)} 張圖片")
+            image_contents = process_images(result["images"])
+            feedback_items.extend(image_contents)
+            debug_log(f"已添加 {len(image_contents)} 張圖片")
 
         # 確保至少有一個回饋項目
         if not feedback_items:
@@ -559,7 +579,13 @@ async def launch_web_feedback_ui(project_dir: str, summary: str, timeout: int) -
         }
 
 
-@mcp.tool()
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Get System Info",
+        readOnlyHint=True,
+        destructiveHint=False,
+    ),
+)
 def get_system_info() -> str:
     """
     獲取系統環境資訊
