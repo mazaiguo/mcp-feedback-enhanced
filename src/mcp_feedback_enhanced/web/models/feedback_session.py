@@ -609,6 +609,7 @@ class WebFeedbackSession:
         for img in images:
             try:
                 if not all(key in img for key in ["name", "data", "size"]):
+                    debug_log(f"圖片缺少必要字段: {list(img.keys())}")
                     continue
 
                 # 檢查文件大小（只有當限制大於0時才檢查）
@@ -618,18 +619,56 @@ class WebFeedbackSession:
                     )
                     continue
 
-                # 解碼 base64 數據
+                # 解碼 base64 數據，處理各種可能的格式
                 if isinstance(img["data"], str):
                     try:
-                        image_bytes = base64.b64decode(img["data"])
+                        data_str = img["data"]
+                        # Strip data URL prefix (data:image/...;base64,)
+                        if data_str.startswith("data:"):
+                            data_str = (
+                                data_str.split(",", 1)[1]
+                                if "," in data_str
+                                else data_str
+                            )
+
+                        # Remove whitespace that breaks base64 decoding
+                        data_str = (
+                            data_str.strip()
+                            .replace("\n", "")
+                            .replace("\r", "")
+                            .replace(" ", "")
+                        )
+
+                        image_bytes = base64.b64decode(data_str)
+                        debug_log(
+                            f"圖片 {img['name']} base64 解碼成功，"
+                            f"長度: {len(data_str)} -> {len(image_bytes)} bytes"
+                        )
                     except Exception as e:
                         debug_log(f"圖片 {img['name']} base64 解碼失敗: {e}")
+                        debug_log(
+                            f"數據類型: {type(img['data'])}, "
+                            f"前100字符: {str(img['data'])[:100]}"
+                        )
                         continue
-                else:
+                elif isinstance(img["data"], bytes):
                     image_bytes = img["data"]
+                    debug_log(
+                        f"圖片 {img['name']} 已是 bytes 格式，"
+                        f"大小: {len(image_bytes)} bytes"
+                    )
+                else:
+                    debug_log(
+                        f"圖片 {img['name']} 數據類型不支援: {type(img['data'])}"
+                    )
+                    continue
 
                 if len(image_bytes) == 0:
                     debug_log(f"圖片 {img['name']} 數據為空，跳過")
+                    continue
+
+                if not self._validate_image_data(image_bytes, img["name"]):
+                    debug_log(f"圖片 {img['name']} 數據驗證失敗，可能已損壞")
                     continue
 
                 processed_images.append(
@@ -645,10 +684,37 @@ class WebFeedbackSession:
                 )
 
             except Exception as e:
+                import traceback
+
                 debug_log(f"圖片處理錯誤: {e}")
+                debug_log(f"詳細錯誤: {traceback.format_exc()}")
                 continue
 
+        debug_log(f"圖片處理完成，成功: {len(processed_images)}/{len(images)}")
         return processed_images
+
+    def _validate_image_data(self, data: bytes, filename: str) -> bool:
+        """Validate image data by checking file header signatures."""
+        if not data or len(data) < 8:
+            return False
+
+        image_signatures = {
+            b"\xFF\xD8\xFF": "JPEG",
+            b"\x89PNG\r\n\x1a\n": "PNG",
+            b"GIF87a": "GIF",
+            b"GIF89a": "GIF",
+            b"BM": "BMP",
+            b"RIFF": "WEBP",
+        }
+
+        for sig, format_name in image_signatures.items():
+            if data.startswith(sig):
+                debug_log(f"圖片 {filename} 驗證成功: {format_name} 格式")
+                return True
+
+        # Accept unrecognized formats and let downstream processing decide
+        debug_log(f"圖片 {filename} 未識別的文件頭: {data[:8].hex()}")
+        return True
 
     def add_log(self, log_entry: str):
         """添加命令日誌"""
