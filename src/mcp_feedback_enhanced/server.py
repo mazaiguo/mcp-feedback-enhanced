@@ -438,7 +438,7 @@ async def interactive_feedback(
     summary: Annotated[
         str, Field(description="AI 工作完成的摘要說明")
     ] = "我已完成了您請求的任務。",
-    timeout: Annotated[int, Field(description="等待用戶回饋的超時時間（秒）")] = 600,
+    timeout: Annotated[int, Field(description="等待用戶回饋的超時時間（秒）")] = 86400,
 ) -> list:
     """Interactive feedback collection tool for LLM agents.
 
@@ -452,7 +452,7 @@ async def interactive_feedback(
     Args:
         project_directory: Project directory path for context
         summary: Summary of AI work completed for user review
-        timeout: Timeout in seconds for waiting user feedback (default: 600 seconds)
+        timeout: Timeout in seconds for waiting user feedback (default: 86400 seconds / 24 hours)
 
     Returns:
         list: List containing TextContent and ImageContent objects representing user feedback
@@ -470,7 +470,7 @@ async def interactive_feedback(
             project_directory = os.getcwd()
         project_directory = os.path.abspath(project_directory)
 
-        # 超時時間優先級: 環境變數 MCP_FEEDBACK_TIMEOUT > 工具參數 timeout > 預設值 600
+        # 超時時間優先級: 環境變數 MCP_FEEDBACK_TIMEOUT > 工具參數 timeout > 預設值 86400
         effective_timeout = timeout
         env_timeout = os.getenv("MCP_FEEDBACK_TIMEOUT")
         if env_timeout:
